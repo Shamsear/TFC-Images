@@ -7,8 +7,8 @@ from pathlib import Path
 SOURCE_BASE = "public/player_cards"
 DEST_PATH = r"D:\Games\SS\playerdata\batches\enhanced_cards_standard"
 
-def get_batch_folders():
-    """Get all batch folders sorted by number"""
+def get_batch_folders(start_from=None):
+    """Get all batch folders sorted by number, optionally starting from a specific batch"""
     batch_folders = []
     source_path = Path(DEST_PATH)
     
@@ -18,7 +18,9 @@ def get_batch_folders():
     
     for folder in source_path.iterdir():
         if folder.is_dir() and folder.name.startswith("batch_"):
-            batch_folders.append(folder)
+            batch_number = int(folder.name.split("_")[1])
+            if start_from is None or batch_number >= start_from:
+                batch_folders.append(folder)
     
     # Sort by batch number
     batch_folders.sort(key=lambda x: int(x.name.split("_")[1]))
@@ -69,42 +71,25 @@ def git_push_batch(batch_name, copied_count):
         
         # Add all new images
         print("  → Running: git add")
-        add_result = subprocess.run(["git", "add", SOURCE_BASE], capture_output=True, text=True)
-        if add_result.returncode != 0:
-            print(f"  ✗ Git add failed!")
-            print(f"  STDOUT: {add_result.stdout}")
-            print(f"  STDERR: {add_result.stderr}")
-            raise subprocess.CalledProcessError(add_result.returncode, "git add", add_result.stdout, add_result.stderr)
+        add_result = subprocess.run(["git", "add", SOURCE_BASE], capture_output=True, text=True, check=True)
         print(f"  ✓ Git add successful")
-        if add_result.stdout:
-            print(f"  Output: {add_result.stdout}")
         
         # Commit with batch name
         commit_msg = f"Add {batch_name} ({copied_count} images)"
-        print(f"  → Running: git commit -m '{commit_msg}'")
-        commit_result = subprocess.run(["git", "commit", "-m", commit_msg], capture_output=True, text=True)
-        if commit_result.returncode != 0:
-            print(f"  ✗ Git commit failed!")
-            print(f"  STDOUT: {commit_result.stdout}")
-            print(f"  STDERR: {commit_result.stderr}")
-            raise subprocess.CalledProcessError(commit_result.returncode, "git commit", commit_result.stdout, commit_result.stderr)
+        print(f"  → Running: git commit")
+        commit_result = subprocess.run(["git", "commit", "-m", commit_msg, "--quiet"], capture_output=True, text=True, check=True)
         print(f"  ✓ Git commit successful")
-        if commit_result.stdout:
-            print(f"  Output: {commit_result.stdout}")
         
-        # Push to GitHub
+        # Push to GitHub with compression
         print(f"  → Running: git push")
-        push_result = subprocess.run(["git", "push"], capture_output=True, text=True)
-        if push_result.returncode != 0:
-            print(f"  ✗ Git push failed!")
-            print(f"  STDOUT: {push_result.stdout}")
-            print(f"  STDERR: {push_result.stderr}")
-            raise subprocess.CalledProcessError(push_result.returncode, "git push", push_result.stdout, push_result.stderr)
+        push_result = subprocess.run(
+            ["git", "push", "--quiet", "--no-progress"],
+            capture_output=True, 
+            text=True, 
+            check=True,
+            env={**os.environ, "GIT_SSH_COMMAND": "ssh -o Compression=yes"}
+        )
         print(f"  ✓ Git push successful")
-        if push_result.stdout:
-            print(f"  Output: {push_result.stdout}")
-        if push_result.stderr:
-            print(f"  Info: {push_result.stderr}")
         
         print(f"\n  ✓ Successfully pushed {batch_name} to GitHub")
         return True
@@ -130,8 +115,12 @@ def main():
     print("Batch Image Copy Tool")
     print("=" * 60)
     
+    # Ask if user wants to resume from a specific batch
+    resume_input = input("\nResume from batch number? (press Enter to start from beginning, or enter batch number like 436): ").strip()
+    start_batch = int(resume_input) if resume_input else None
+    
     # Get all batch folders
-    batch_folders = get_batch_folders()
+    batch_folders = get_batch_folders(start_from=start_batch)
     
     if not batch_folders:
         print("No batch folders found!")
@@ -140,10 +129,32 @@ def main():
     print(f"\nFound {len(batch_folders)} batch folders")
     print(f"Destination: {SOURCE_BASE}\n")
     
+    # Ask user for batch grouping
+    print("\nPush strategy:")
+    print("  1. Push after each batch (safest, slowest) - ~2000+ pushes remaining")
+    print("  2. Group 10 batches per push (recommended) - ~200 pushes remaining")
+    print("  3. Group 20 batches per push (faster) - ~100 pushes remaining")
+    print("  4. Group 50 batches per push (fastest) - ~40 pushes remaining")
+    print("  5. Custom number of batches per push")
+    choice = input("\nChoose option (1-5, default=2): ").strip() or "2"
+    
+    batches_per_push_map = {"1": 1, "2": 10, "3": 20, "4": 50}
+    
+    if choice in batches_per_push_map:
+        batches_per_push = batches_per_push_map[choice]
+    elif choice == "5":
+        batches_input = input("How many batches per push? (recommended: 10-50): ").strip()
+        batches_per_push = int(batches_input) if batches_input else 10
+    else:
+        batches_per_push = 10
+        print(f"Invalid choice, using default: {batches_per_push} batches per push")
+    
     # Process each batch
     total_copied = 0
     total_skipped = 0
     batches_processed = 0
+    batch_group_names = []
+    batch_group_copied = 0
     
     for i, batch_folder in enumerate(batch_folders, 1):
         print(f"\n[{i}/{len(batch_folders)}] Processing {batch_folder.name}")
@@ -151,12 +162,19 @@ def main():
         copied, skipped = copy_batch(batch_folder, SOURCE_BASE)
         total_copied += copied
         total_skipped += skipped
+        batch_group_names.append(batch_folder.name)
+        batch_group_copied += copied
         
-        # Push to GitHub after each batch
-        if not git_push_batch(batch_folder.name, copied):
-            print("\n⚠ Stopping batch processing due to error.")
-            batches_processed = i
-            break
+        # Push to GitHub after group of batches
+        should_push = (i % batches_per_push == 0) or (i == len(batch_folders))
+        if should_push:
+            group_name = f"{batch_group_names[0]}-{batch_group_names[-1]}" if len(batch_group_names) > 1 else batch_group_names[0]
+            if not git_push_batch(group_name, batch_group_copied):
+                print("\n⚠ Stopping batch processing due to error.")
+                batches_processed = i
+                break
+            batch_group_names = []
+            batch_group_copied = 0
         
         batches_processed = i
     
