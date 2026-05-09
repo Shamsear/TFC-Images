@@ -5,7 +5,7 @@ from pathlib import Path
 
 # Source and destination paths
 SOURCE_BASE = "public/player_cards"
-DEST_PATH = r"D:\Games\SS\playerdata\enhanced_cards"
+DEST_PATH = r"D:\Games\SS\playerdata\batches\enhanced_cards_standard"
 
 def get_batch_folders(start_from=None):
     """Get all batch folders sorted by number, optionally starting from a specific batch"""
